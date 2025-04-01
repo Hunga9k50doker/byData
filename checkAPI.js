@@ -25,8 +25,8 @@ async function getBaseApi(url) {
   try {
     const response = await axios.get(url);
     const content = response.data;
-    if (content?.ogLab) {
-      return { endpoint: content.ogLab, message: content.copyright };
+    if (content?.byData) {
+      return { endpoint: content.byData, message: content.copyright };
     } else {
       return {
         endpoint: null,

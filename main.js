@@ -174,21 +174,30 @@ class ClientAPI {
       try {
         const response = await axios({
           method,
-          url: `${url}`,
+          url,
           headers,
           timeout: 60000,
-          ...(proxyAgent ? { httpsAgent: proxyAgent } : {}),
+          ...(proxyAgent
+            ? {
+                httpsAgent: proxyAgent,
+                httpAgent: proxyAgent,
+              }
+            : {}),
           ...(method.toLowerCase() != "get" ? { data: JSON.stringify(data || {}) } : {}),
         });
         if (response?.data?.data) return { status: response.status, success: true, data: response.data.data };
         return { success: true, data: response.data, status: response.status };
       } catch (error) {
         const errorMessage = error?.response?.data?.error || error?.response?.data?.message || error.message;
-        // this.log(`Request failed: ${url} | ${error.message}...`, "warning");
+        this.log(`Request failed: ${url} | ${error.message}...`, "warning");
 
         if (error.message.includes("stream has been aborted")) {
           return { success: false, status: error.status, data: null, error: errorMessage };
         }
+        if (error.status == 404 && url.includes(`v1/users/${this.itemData.address}`)) {
+          return { success: false, status: error.status, error: errorMessage, data: null };
+        }
+
         if (error.status == 401) {
           // this.log(`Error 401: ${JSON.stringify(error.response.data)}`, "warning");
           // let token = null;
@@ -239,35 +248,31 @@ class ClientAPI {
     );
   }
 
-  async getStats() {
-    return this.makeRequest(`${this.baseURL}/v1/referrals/${this.itemData.address}/stats`, "get");
+  async getStats(refcode) {
+    return this.makeRequest(`${this.baseURL}/v1/users/${refcode}/referral-count`, "get");
   }
 
   async getUserData() {
     return this.makeRequest(`${this.baseURL}/v1/users/${this.itemData.address}`, "get");
   }
 
-  async login() {
+  async register() {
     return this.makeRequest(`${this.baseURL}/v1/users`, "post", {
       walletAddress: this.itemData.address,
       referredCode: settings.REF_CODE,
     });
   }
 
-  async getTasks(category = "PARTNERS") {
-    return this.makeRequest(`${this.baseURL}/v1/social/${this.itemData.address}?category=${category}`, "get");
+  async getTasks() {
+    return this.makeRequest(`${this.baseURL}/v1/social/actions/${this.itemData.address}`, "get");
   }
 
   async completeTask(payload) {
-    //    {
-    //     "walletAddress": "0xE2E7Ba18acE37Db3DD27648D4Fe699D466F5f48a",
-    //     "id": "ee21f367-00f9-4e72-a05c-9f6b38fa19fb"
-    // }
-    return this.makeRequest(`${this.baseURL}/v1/social/complete`, "post", payload);
+    return this.makeRequest(`${this.baseURL}/v1/social/actions/complete`, "post", payload);
   }
 
   async claimTask(payload) {
-    return this.makeRequest(`${this.baseURL}/v1/social/claim`, "post", payload);
+    return this.makeRequest(`${this.baseURL}/v1/social/actions/claim`, "post", payload);
   }
 
   async sendMess(payload) {
@@ -311,10 +316,20 @@ class ClientAPI {
       if (userData?.success) break;
       retries++;
     } while (retries < 1 && userData.status !== 400);
-    const statsRes = await this.getStats();
-    if (userData.success) {
+
+    if ((!userData?.success && userData?.status == 404) || !userData?.data?.user) {
+      this.log(`User ${this.itemData.address} not found, try register`, "warning");
+      userData = await this.register();
+    }
+    if (userData?.success) {
       const { user } = userData.data;
-      this.log(`Tier: ${user.tier} | Ref code: ${user.referralCode} | Ref XP: ${user.referralXP} | Total XP: ${user.totalXP} | Total points: ${user.totalPoints}`, "custom");
+      this.log(
+        `[Ref by: ${user?.referredCode || settings.REF_CODE}] Tier: ${user.tier} | Ref code: ${user.referralCode} | Ref XP: ${user.referralXP} | Total XP: ${user.totalXP} | Total points: ${
+          user.totalPoints
+        }`,
+        "custom"
+      );
+      // const statsRes = await this.getStats(user.referralCode);
     } else {
       return this.log("Can't sync new data...skipping", "warning");
     }
@@ -323,20 +338,17 @@ class ClientAPI {
 
   async handleTask() {
     let tasks = [];
-    const categories = ["PARTNERS", "SOCIAL"];
-    for (const cate of categories) {
-      const result = await this.getTasks(cate);
-      if (!result.success) continue;
-      const tasksAvailable = result.data.socialActions.filter((task) => task.isActive && !task.claimed && !settings.SKIP_TASKS.includes(task.id));
-      tasks = [...tasks, ...tasksAvailable];
-    }
-
+    const result = await this.getTasks();
+    if (!result.success) return;
+    const tasksAvailable = result.data.socialActions.filter((task) => task.isActive && !task.claimed && !settings.SKIP_TASKS.includes(task.id));
+    tasks = [...tasks, ...tasksAvailable];
     if (tasks.length == 0) return this.log(`No tasks available!`, "warning");
     for (const task of tasks) {
-      await sleep(1);
+      const timesleep = getRandomNumber(settings.DELAY_BETWEEN_REQUESTS[0], settings.DELAY_BETWEEN_REQUESTS[1]);
+      this.log(`Trying complete task: ${task.id} | ${task.title} | Waiting ${timesleep}s...`, "info");
+      await sleep(timesleep);
       let isCompleted = false;
       if (!task.completed) {
-        this.log(`Trying complete task: ${task.id} | ${task.title}...`, "info");
         const resComplete = await this.completeTask({
           walletAddress: this.itemData.address,
           id: task.id,
@@ -380,13 +392,10 @@ class ClientAPI {
     // const token = await this.getValidToken();
     // if (!token) return;
     // this.token = token;
-    await this.login();
     const userData = await this.handleSyncData();
     if (userData.success) {
       if (settings.AUTO_TASK) {
         await this.handleTask();
-        await sleep(1);
-        await this.handleSyncData();
       }
     } else {
       return this.log("Can't get use info...skipping", "error");
